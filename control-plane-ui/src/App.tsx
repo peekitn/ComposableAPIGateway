@@ -1,9 +1,10 @@
 // control-plane-ui/src/App.tsx
 import { useState, useEffect } from "react";
+import axios from "axios";
 import { CreateApiForm } from "./pages/CreateApi";
-import { ApiList } from "./pages/ApiList";
 import { ProxyTest } from "./pages/ProxyTest";
-import { listApis } from "./api/apis";
+import { AddEndpointForm } from "./pages/AddEndpoint";
+import { API_BASE_URL } from "./config";
 
 type Api = {
   id: string;
@@ -13,48 +14,144 @@ type Api = {
   openapiSpec?: any;
 };
 
+type User = {
+  id: string;
+  name: string;
+  email: string;
+};
+
 export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [token, setToken] = useState<string | null>(null);
   const [apis, setApis] = useState<Api[]>([]);
   const [selectedApi, setSelectedApi] = useState<Api | null>(null);
 
+  const refreshApis = async () => {
+    if (!token) {
+      console.log("refreshApis: sem token");
+      return;
+    }
+
+    console.log("refreshApis: token", token);
+    try {
+      const res = await axios.get(`${API_BASE_URL}/apis`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      console.log("APIs carregadas:", res.data);
+      setApis(res.data);
+    } catch (err: any) {
+      console.error("Erro ao atualizar APIs", err);
+      if (err.response?.status === 401) {
+        console.log("Token inválido, fazendo logout");
+        localStorage.removeItem("token");
+        setToken(null);
+        setUser(null);
+      }
+    }
+  };
+
+  // Carregar token salvo
   useEffect(() => {
-    listApis()
-      .then(setApis)
-      .catch((err) => console.error("Erro ao carregar APIs", err));
+    const savedToken = localStorage.getItem("token");
+    if (savedToken) {
+      console.log("Token carregado do storage:", savedToken);
+      setToken(savedToken);
+    }
   }, []);
+
+  // Buscar usuário quando o token existir
+  useEffect(() => {
+    if (!token) return;
+
+    console.log("Verificando token com /auth/me");
+    axios
+      .get(`${API_BASE_URL}/auth/me`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      .then((res) => {
+        console.log("Usuário autenticado:", res.data);
+        setUser(res.data);
+        // Só busca APIs após confirmar que o token é válido
+        refreshApis();
+      })
+      .catch((err) => {
+        console.error("Erro no /auth/me", err);
+        setToken(null);
+        setUser(null);
+        localStorage.removeItem("token");
+      });
+  }, [token]);
+
+  const handleSelectApi = async (apiId: string) => {
+    if (!apiId) {
+      setSelectedApi(null);
+      return;
+    }
+
+    try {
+      const res = await axios.get(`${API_BASE_URL}/apis/${apiId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setSelectedApi(res.data);
+    } catch (err) {
+      console.error("Erro ao buscar API completa", err);
+    }
+  };
+
+  if (!user) {
+    return (
+      <AuthForms
+        onLogin={(t, u) => {
+          console.log("Login realizado, token:", t);
+          setToken(t);
+          setUser(u);
+          localStorage.setItem("token", t);
+        }}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-r from-blue-50 to-indigo-50 font-sans">
-      {/* Header */}
-      <header className="bg-blue-600 text-white p-6 shadow-md">
-        <h1 className="text-4xl font-bold text-center">Composable API Gateway</h1>
+      <header className="bg-blue-600 text-white p-6 shadow-md flex justify-between items-center">
+        <div>
+          <h1 className="text-4xl font-bold">Composable API Gateway</h1>
+          <p className="mt-2">Bem-vindo, {user.name}</p>
+        </div>
+        <button
+          className="bg-red-500 px-4 py-2 rounded hover:bg-red-600"
+          onClick={() => {
+            localStorage.removeItem("token");
+            setToken(null);
+            setUser(null);
+          }}
+        >
+          Sair
+        </button>
       </header>
 
-      {/* Main content */}
       <main className="p-6 max-w-7xl mx-auto space-y-6">
-        {/* Criação de API */}
-        <section className="bg-white p-6 rounded-xl shadow-lg hover:shadow-xl transition">
-          <h2 className="text-2xl font-semibold text-blue-700 mb-4">Criar nova API</h2>
-          <CreateApiForm />
+        <section className="bg-white p-6 rounded-xl shadow-lg">
+          <h2 className="text-2xl font-semibold text-blue-700 mb-4">
+            Criar nova API
+          </h2>
+          <CreateApiForm onCreated={refreshApis} />
         </section>
 
-        {/* APIs cadastradas */}
-        <section className="bg-white p-6 rounded-xl shadow-lg hover:shadow-xl transition">
-          <h2 className="text-2xl font-semibold text-blue-700 mb-4">APIs Cadastradas</h2>
-          <ApiList />
+        <section className="bg-white p-6 rounded-xl shadow-lg">
+          <h2 className="text-2xl font-semibold text-blue-700 mb-4">
+            APIs Cadastradas
+          </h2>
 
-          {apis.length > 0 && (
-            <div className="mt-4">
+          {apis.length > 0 ? (
+            <div>
               <label className="block mb-2 font-medium text-gray-700">
-                Selecione a API para testar:
+                Selecione a API:
               </label>
               <select
-                className="border rounded p-2 w-full focus:ring-2 focus:ring-blue-400"
+                className="border rounded p-2 w-full"
                 value={selectedApi?.id || ""}
-                onChange={(e) => {
-                  const api = apis.find((a) => a.id === e.target.value) || null;
-                  setSelectedApi(api);
-                }}
+                onChange={(e) => handleSelectApi(e.target.value)}
               >
                 <option value="">-- Selecione a API --</option>
                 {apis.map((api) => (
@@ -64,39 +161,129 @@ export default function App() {
                 ))}
               </select>
             </div>
+          ) : (
+            <p className="text-gray-500">Nenhuma API cadastrada</p>
+          )}
+
+          {selectedApi && token && (
+            <div className="mt-6">
+              <h3 className="text-xl font-semibold text-blue-600 mb-3">
+                Adicionar Endpoint Manualmente
+              </h3>
+              <AddEndpointForm
+                apiId={selectedApi.id}
+                token={token}
+                onEndpointCreated={refreshApis}
+              />
+            </div>
           )}
         </section>
 
-        {/* Proxy Test */}
-        <section className="bg-white p-6 rounded-xl shadow-lg hover:shadow-xl transition">
-          <h2 className="text-2xl font-semibold text-blue-700 mb-4">Testar Proxy</h2>
+        <section className="bg-white p-6 rounded-xl shadow-lg">
+          <h2 className="text-2xl font-semibold text-blue-700 mb-4">
+            Testar Proxy
+          </h2>
           {selectedApi ? (
             <ProxyTest api={selectedApi} />
           ) : (
-            <p className="text-gray-500">Selecione uma API acima para testar o proxy</p>
+            <p className="text-gray-500">
+              Selecione uma API acima para testar o proxy
+            </p>
           )}
         </section>
-
-        {/* Dashboard Cards */}
-        <section className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="bg-blue-100 p-4 rounded-xl shadow-md text-center">
-            <h3 className="font-semibold text-lg text-blue-800">Total de APIs</h3>
-            <p className="text-2xl font-bold text-blue-900">{apis.length}</p>
-          </div>
-          <div className="bg-green-100 p-4 rounded-xl shadow-md text-center">
-            <h3 className="font-semibold text-lg text-green-800">APIs com Endpoints</h3>
-            <p className="text-2xl font-bold text-green-900">
-              {apis.filter((a) => a.openapiSpec?.paths && Object.keys(a.openapiSpec.paths).length > 0).length}
-            </p>
-          </div>
-          <div className="bg-yellow-100 p-4 rounded-xl shadow-md text-center">
-            <h3 className="font-semibold text-lg text-yellow-800">APIs sem Endpoints</h3>
-            <p className="text-2xl font-bold text-yellow-900">
-              {apis.filter((a) => !a.openapiSpec?.paths || Object.keys(a.openapiSpec.paths).length === 0).length}
-            </p>
-          </div>
-        </section>
       </main>
+    </div>
+  );
+}
+
+// AuthForms (igual ao anterior, só adicionei type="email" e required)
+function AuthForms({ onLogin }: { onLogin: (token: string, user: User) => void }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
+  const [isRegister, setIsRegister] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleSubmit = async () => {
+    try {
+      const url = isRegister
+        ? `${API_BASE_URL}/auth/register`
+        : `${API_BASE_URL}/auth/login`;
+
+      const body: any = isRegister
+        ? { name, email, password }
+        : { email, password };
+
+      const res = await axios.post(url, body);
+
+      if (isRegister) {
+        setIsRegister(false);
+        setError("");
+      } else {
+        onLogin(res.data.token, res.data.user);
+      }
+    } catch (err: any) {
+      setError(err.response?.data?.error || "Erro desconhecido");
+    }
+  };
+
+  return (
+    <div className="flex items-center justify-center min-h-screen bg-gradient-to-r from-blue-50 to-indigo-50">
+      <div className="bg-white p-8 rounded-xl shadow-lg w-96">
+        <h2 className="text-2xl font-semibold mb-4">
+          {isRegister ? "Criar Conta" : "Login"}
+        </h2>
+
+        {isRegister && (
+          <input
+            placeholder="Nome"
+            className="w-full p-2 mb-2 border rounded"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            required
+          />
+        )}
+
+        <input
+          placeholder="Email"
+          type="email"
+          className="w-full p-2 mb-2 border rounded"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          required
+        />
+
+        <input
+          placeholder="Senha"
+          type="password"
+          className="w-full p-2 mb-2 border rounded"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          required
+        />
+
+        {error && <p className="text-red-600 mb-2">{error}</p>}
+
+        <button
+          className="w-full bg-blue-600 text-white p-2 rounded hover:bg-blue-700"
+          onClick={handleSubmit}
+        >
+          {isRegister ? "Criar Conta" : "Login"}
+        </button>
+
+        <p className="mt-2 text-sm text-gray-600 text-center">
+          {isRegister ? "Já tem conta?" : "Não tem conta?"}{" "}
+          <span
+            className="text-blue-600 cursor-pointer"
+            onClick={() => {
+              setIsRegister(!isRegister);
+              setError("");
+            }}
+          >
+            {isRegister ? "Login" : "Criar Conta"}
+          </span>
+        </p>
+      </div>
     </div>
   );
 }

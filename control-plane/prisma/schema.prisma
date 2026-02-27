@@ -7,17 +7,31 @@ generator client {
   provider = "prisma-client-js"
 }
 
+model User {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  password  String // armazenar hash, nunca plain text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  apis Api[] // Cada usuário terá suas APIs
+}
+
 model Api {
   id          String   @id @default(uuid())
   name        String
   slug        String   @unique
   baseUrl     String
   openapiSpec Json
+  userId      String?   // <- torna opcional
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  // relação com logs
   requestLogs RequestLog[]
+  endpoints Endpoint[]
+
+  user User? @relation(fields: [userId], references: [id])
 }
 
 model RequestLog {
@@ -32,4 +46,14 @@ model RequestLog {
   createdAt DateTime @default(now())
 
   api Api @relation(fields: [apiId], references: [id])
+}
+
+model Endpoint {
+  id        String   @id @default(cuid())
+  method    String
+  path      String
+  description String?
+  api       Api      @relation(fields: [apiId], references: [id])
+  apiId     String
+  createdAt DateTime @default(now())
 }

@@ -1,3 +1,14 @@
+/* src/index.css */
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Inputs e botões personalizados */
+.input {
+  @apply w-full p-2 mb-2 border rounded;
+}
+
+.btn {
+  @apply w-full bg-blue-600 text-white p-2 rounded hover:bg-blue-700;
+}

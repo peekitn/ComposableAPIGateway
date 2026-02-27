@@ -26,14 +26,13 @@ export async function apiRoutes(app: FastifyInstance) {
       openapiUrl?: string;
     };
 
-    // Campos obrigatórios
     if (!name || !slug || !baseUrl) {
       return reply.status(400).send({ error: "Missing fields" });
     }
 
     let openapiSpec: any = openapi || null;
 
-    // 1️⃣ Se fornecer URL do OpenAPI, buscar automaticamente
+    // 1️⃣ Buscar OpenAPI automaticamente se URL fornecida
     if (openapiUrl) {
       try {
         const response = await axios.get(openapiUrl);
@@ -53,37 +52,28 @@ export async function apiRoutes(app: FastifyInstance) {
           .send({ error: "OpenAPI inválida", details: result.errors });
       }
     } else {
-      // fallback vazio
       openapiSpec = { paths: {} };
     }
 
     // 3️⃣ Criar API no banco
     const api = await prisma.api.create({
-      data: {
-        name,
-        slug,
-        baseUrl,
-        openapiSpec,
-      },
+      data: { name, slug, baseUrl, openapiSpec },
     });
 
     return reply.status(201).send(api);
   });
 
-  // ✅ PROXY DINÂMICO (Nível 2)
+  // ✅ PROXY DINÂMICO (Nível 2) COM LOGS COMPLETOS
   app.all("/proxy/:slug/*", async (request, reply) => {
     const { slug } = request.params as { slug: string };
     const path = request.params["*"] || "";
 
-    // Buscar API pelo slug
     const api = await prisma.api.findUnique({ where: { slug } });
     if (!api) return reply.status(404).send({ error: "API não encontrada" });
 
-    // Log básico
     console.log(`[Proxy] ${request.method} /${slug}/${path} - Body:`, request.body);
 
     try {
-      // Ignorar certificado SSL apenas em dev
       const agent = new https.Agent({ rejectUnauthorized: false });
 
       const response = await axios({
@@ -94,9 +84,36 @@ export async function apiRoutes(app: FastifyInstance) {
         httpsAgent: agent,
       });
 
+      // 🔹 Salvar log de sucesso
+      await prisma.requestLog.create({
+        data: {
+          apiId: api.id,
+          method: request.method,
+          path,
+          body: request.body || null,
+          headers: request.headers as any,
+          status: response.status,
+          response: response.data,
+        },
+      });
+
       reply.status(response.status).send(response.data);
     } catch (err: any) {
       console.error(`[Proxy Error] ${err.message}`);
+
+      // 🔹 Salvar log de erro
+      await prisma.requestLog.create({
+        data: {
+          apiId: api.id,
+          method: request.method,
+          path,
+          body: request.body || null,
+          headers: request.headers as any,
+          status: err.response?.status || 500,
+          response: err.response?.data || { error: err.message },
+        },
+      });
+
       reply
         .status(err.response?.status || 500)
         .send(err.response?.data || { error: err.message });

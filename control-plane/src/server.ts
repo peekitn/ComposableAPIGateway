@@ -2,17 +2,20 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { apiRoutes } from "./routes/api";
 import { authRoutes } from "./routes/auth";
-//import { authPlugin } from "./plugins/auth"; // <-- import
+import { authPlugin } from "./plugins/auth";
 
 async function bootstrap() {
   const app = Fastify({ logger: true });
 
+  // CORS configurado para permitir DELETE e outros métodos
   await app.register(cors, {
     origin: "http://localhost:5173",
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   });
 
-  // Plugin de autenticação (deve vir antes das rotas protegidas)
-  //await app.register(authPlugin);
+  // Plugin de autenticação
+  await app.register(authPlugin);
 
   // Rotas
   await app.register(authRoutes);

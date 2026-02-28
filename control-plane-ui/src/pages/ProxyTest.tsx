@@ -20,6 +20,7 @@ type Props = {
   api: Api;
 };
 
+// Métodos HTTP válidos
 const HTTP_METHODS = ["get", "post", "put", "delete", "patch", "options", "head"];
 
 export function ProxyTest({ api }: Props) {
@@ -44,8 +45,27 @@ export function ProxyTest({ api }: Props) {
       setLoadingEndpoints(true);
       console.log("🔵 Carregando endpoints...");
 
+      // Verifica se há OpenAPI com paths não vazios e com métodos
+      let hasValidOpenAPI = false;
       if (api.openapiSpec?.paths) {
-        console.log("🔵 Tentando extrair do OpenAPI");
+        // Verifica se pelo menos um path tem métodos
+        const paths = api.openapiSpec.paths;
+        for (const path in paths) {
+          const methods = paths[path];
+          if (methods && typeof methods === "object") {
+            const validMethods = Object.keys(methods).filter(m =>
+              HTTP_METHODS.includes(m.toLowerCase())
+            );
+            if (validMethods.length > 0) {
+              hasValidOpenAPI = true;
+              break;
+            }
+          }
+        }
+      }
+
+      if (hasValidOpenAPI) {
+        console.log("🔵 OpenAPI válido encontrado, extraindo endpoints...");
         const swaggerEndpoints: Endpoint[] = [];
 
         Object.entries(api.openapiSpec.paths).forEach(([path, methods]: [string, any]) => {
@@ -54,7 +74,7 @@ export function ProxyTest({ api }: Props) {
             const validMethods = Object.keys(methods).filter(m =>
               HTTP_METHODS.includes(m.toLowerCase())
             );
-            console.log(`🔵 Métodos válidos encontrados para ${path}:`, validMethods);
+            console.log(`🔵 Métodos válidos para ${path}:`, validMethods);
             validMethods.forEach(method => {
               swaggerEndpoints.push({
                 method: method.toUpperCase(),
@@ -70,6 +90,8 @@ export function ProxyTest({ api }: Props) {
         return;
       }
 
+      // Se não há OpenAPI válido, busca endpoints manuais
+      console.log("🔵 Nenhum OpenAPI válido, buscando endpoints manuais...");
       if (!token) {
         console.log("🔵 Sem token, não pode buscar endpoints manuais");
         setEndpoints([]);
@@ -169,7 +191,6 @@ export function ProxyTest({ api }: Props) {
               ⚠️ O OpenAPI foi encontrado, mas não contém métodos HTTP definidos. Você pode adicionar endpoints manualmente abaixo.
             </p>
           )}
-          {/* Botão para inspecionar o OpenAPI bruto */}
           {api.openapiSpec && (
             <details className="mt-4">
               <summary className="text-sm text-blue-600 cursor-pointer">

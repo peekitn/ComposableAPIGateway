@@ -20,6 +20,8 @@ type Props = {
   api: Api;
 };
 
+const HTTP_METHODS = ["get", "post", "put", "delete", "patch", "options", "head"];
+
 export function ProxyTest({ api }: Props) {
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [selectedEndpoint, setSelectedEndpoint] = useState<Endpoint | null>(null);
@@ -27,52 +29,82 @@ export function ProxyTest({ api }: Props) {
   const [response, setResponse] = useState<any>(null);
   const [loadingProxy, setLoadingProxy] = useState(false);
   const [bodyError, setBodyError] = useState("");
+  const [loadingEndpoints, setLoadingEndpoints] = useState(true);
 
   const token = localStorage.getItem("token");
 
   useEffect(() => {
+    console.log("🟢 ProxyTest montado/atualizado para API:", api.name, api.id);
+    console.log("🟢 openapiSpec existe?", !!api.openapiSpec);
+    if (api.openapiSpec) {
+      console.log("🟢 openapiSpec.paths:", api.openapiSpec.paths);
+    }
+
     async function loadEndpoints() {
-      // 🔵 CASO 1: API TEM OPENAPI
+      setLoadingEndpoints(true);
+      console.log("🔵 Carregando endpoints...");
+
       if (api.openapiSpec?.paths) {
+        console.log("🔵 Tentando extrair do OpenAPI");
         const swaggerEndpoints: Endpoint[] = [];
 
-        Object.entries(api.openapiSpec.paths).forEach(
-          ([path, methods]: any) => {
-            Object.keys(methods).forEach((method) => {
+        Object.entries(api.openapiSpec.paths).forEach(([path, methods]: [string, any]) => {
+          console.log(`🔵 Path: ${path}, methods object:`, methods);
+          if (methods && typeof methods === "object") {
+            const validMethods = Object.keys(methods).filter(m =>
+              HTTP_METHODS.includes(m.toLowerCase())
+            );
+            console.log(`🔵 Métodos válidos encontrados para ${path}:`, validMethods);
+            validMethods.forEach(method => {
               swaggerEndpoints.push({
                 method: method.toUpperCase(),
                 path,
               });
             });
           }
-        );
+        });
 
+        console.log("🔵 Endpoints extraídos do OpenAPI:", swaggerEndpoints);
         setEndpoints(swaggerEndpoints);
+        setLoadingEndpoints(false);
         return;
       }
 
-      // 🟢 CASO 2: API MANUAL (buscar do banco)
-      if (!token) return;
+      if (!token) {
+        console.log("🔵 Sem token, não pode buscar endpoints manuais");
+        setEndpoints([]);
+        setLoadingEndpoints(false);
+        return;
+      }
 
       try {
-        const res = await fetch(`${API_BASE_URL}/apis/${api.id}/endpoints`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
+        const url = `${API_BASE_URL}/apis/${api.id}/endpoints`;
+        console.log("🔵 Buscando endpoints manuais de:", url);
+
+        const res = await fetch(url, {
+          headers: { Authorization: `Bearer ${token}` },
         });
 
+        console.log("🔵 Resposta do fetch:", res.status, res.statusText);
+
+        if (!res.ok) {
+          throw new Error(`Erro ${res.status}: ${res.statusText}`);
+        }
+
         const data = await res.json();
+        console.log("🔵 Endpoints manuais recebidos:", data);
 
         if (Array.isArray(data)) {
           setEndpoints(data);
-        } else if (Array.isArray(data.endpoints)) {
-          setEndpoints(data.endpoints);
         } else {
+          console.warn("🔵 Formato inesperado:", data);
           setEndpoints([]);
         }
       } catch (err) {
-        console.error("Erro ao buscar endpoints", err);
+        console.error("🔵 Erro ao buscar endpoints", err);
         setEndpoints([]);
+      } finally {
+        setLoadingEndpoints(false);
       }
     }
 
@@ -80,12 +112,11 @@ export function ProxyTest({ api }: Props) {
     setSelectedEndpoint(null);
     setResponse(null);
     setBodyError("");
-  }, [api]);
+  }, [api, token]);
 
   async function handleProxyCall() {
     if (!selectedEndpoint) return;
 
-    // Validar JSON se não for GET
     if (selectedEndpoint.method !== "GET") {
       try {
         JSON.parse(requestBody);
@@ -100,21 +131,20 @@ export function ProxyTest({ api }: Props) {
     setResponse(null);
 
     try {
-      const res = await fetch(
-        `${API_BASE_URL}/proxy/${api.slug}/${selectedEndpoint.path.replace(/^\//, "")}`,
-        {
-          method: selectedEndpoint.method,
-          headers: { "Content-Type": "application/json" },
-          body:
-            selectedEndpoint.method !== "GET"
-              ? requestBody
-              : undefined,
-        }
-      );
+      const url = `${API_BASE_URL}/proxy/${api.slug}/${selectedEndpoint.path.replace(/^\//, "")}`;
+      console.log("🟡 Chamando proxy:", url, "método:", selectedEndpoint.method);
+
+      const res = await fetch(url, {
+        method: selectedEndpoint.method,
+        headers: { "Content-Type": "application/json" },
+        body: selectedEndpoint.method !== "GET" ? requestBody : undefined,
+      });
 
       const data = await res.json();
+      console.log("🟡 Resposta do proxy:", data);
       setResponse(data);
     } catch (err: any) {
+      console.error("🟡 Erro no proxy:", err);
       setResponse({ error: err.message });
     } finally {
       setLoadingProxy(false);
@@ -127,10 +157,30 @@ export function ProxyTest({ api }: Props) {
         Proxy Test - {api.name}
       </h2>
 
-      {endpoints.length === 0 ? (
-        <p className="text-gray-500">
-          Nenhum endpoint encontrado para essa API
-        </p>
+      {loadingEndpoints ? (
+        <p>Carregando endpoints...</p>
+      ) : endpoints.length === 0 ? (
+        <div>
+          <p className="text-gray-500 mb-3">
+            Nenhum endpoint encontrado para essa API.
+          </p>
+          {api.openapiSpec?.paths && (
+            <p className="text-sm text-yellow-600">
+              ⚠️ O OpenAPI foi encontrado, mas não contém métodos HTTP definidos. Você pode adicionar endpoints manualmente abaixo.
+            </p>
+          )}
+          {/* Botão para inspecionar o OpenAPI bruto */}
+          {api.openapiSpec && (
+            <details className="mt-4">
+              <summary className="text-sm text-blue-600 cursor-pointer">
+                Ver OpenAPI bruto (para depuração)
+              </summary>
+              <pre className="bg-gray-100 p-2 mt-2 rounded text-xs overflow-auto max-h-60">
+                {JSON.stringify(api.openapiSpec, null, 2)}
+              </pre>
+            </details>
+          )}
+        </div>
       ) : (
         <>
           <select

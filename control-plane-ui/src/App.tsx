@@ -1,4 +1,3 @@
-// control-plane-ui/src/App.tsx
 import { useState, useEffect } from "react";
 import axios from "axios";
 import { CreateApiForm } from "./pages/CreateApi";
@@ -25,6 +24,7 @@ export default function App() {
   const [token, setToken] = useState<string | null>(null);
   const [apis, setApis] = useState<Api[]>([]);
   const [selectedApi, setSelectedApi] = useState<Api | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const refreshApis = async () => {
     if (!token) {
@@ -50,7 +50,47 @@ export default function App() {
     }
   };
 
-  // Carregar token salvo
+  const handleEndpointCreated = async () => {
+    await refreshApis();
+
+    if (selectedApi && token) {
+      try {
+        console.log("Recarregando API selecionada após criação de endpoint");
+        const res = await axios.get(`${API_BASE_URL}/apis/${selectedApi.id}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        console.log("🔎 API completa recebida:", JSON.stringify(res.data, null, 2));
+        setSelectedApi(res.data);
+      } catch (err) {
+        console.error("Erro ao recarregar API selecionada", err);
+      }
+    }
+  };
+
+  // Função para deletar API
+  const handleDeleteApi = async (apiId: string, apiName: string) => {
+    if (!window.confirm(`Tem certeza que deseja deletar a API "${apiName}"?`)) {
+      return;
+    }
+
+    setDeletingId(apiId);
+    try {
+      await axios.delete(`${API_BASE_URL}/apis/${apiId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      // Se a API deletada for a selecionada, limpar seleção
+      if (selectedApi?.id === apiId) {
+        setSelectedApi(null);
+      }
+      await refreshApis(); // Atualiza lista
+    } catch (err: any) {
+      console.error("Erro ao deletar API", err);
+      alert("Erro ao deletar API: " + (err.response?.data?.error || err.message));
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   useEffect(() => {
     const savedToken = localStorage.getItem("token");
     if (savedToken) {
@@ -59,7 +99,6 @@ export default function App() {
     }
   }, []);
 
-  // Buscar usuário quando o token existir
   useEffect(() => {
     if (!token) return;
 
@@ -71,7 +110,6 @@ export default function App() {
       .then((res) => {
         console.log("Usuário autenticado:", res.data);
         setUser(res.data);
-        // Só busca APIs após confirmar que o token é válido
         refreshApis();
       })
       .catch((err) => {
@@ -92,6 +130,7 @@ export default function App() {
       const res = await axios.get(`${API_BASE_URL}/apis/${apiId}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
+      console.log("🔎 API completa recebida:", JSON.stringify(res.data, null, 2));
       setSelectedApi(res.data);
     } catch (err) {
       console.error("Erro ao buscar API completa", err);
@@ -143,10 +182,11 @@ export default function App() {
             APIs Cadastradas
           </h2>
 
+          {/* Select para selecionar API */}
           {apis.length > 0 ? (
-            <div>
+            <div className="mb-6">
               <label className="block mb-2 font-medium text-gray-700">
-                Selecione a API:
+                Selecione a API para testar:
               </label>
               <select
                 className="border rounded p-2 w-full"
@@ -162,9 +202,45 @@ export default function App() {
               </select>
             </div>
           ) : (
-            <p className="text-gray-500">Nenhuma API cadastrada</p>
+            <p className="text-gray-500 mb-4">Nenhuma API cadastrada</p>
           )}
 
+          {/* Lista de APIs em cards com botão deletar */}
+          {apis.length > 0 && (
+            <div>
+              <h3 className="text-lg font-semibold text-gray-700 mb-3">Suas APIs</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {apis.map((api) => (
+                  <div
+                    key={api.id}
+                    className={`border rounded-lg p-4 shadow-sm hover:shadow-md transition ${
+                      selectedApi?.id === api.id ? "border-blue-500 bg-blue-50" : "border-gray-200 bg-white"
+                    }`}
+                  >
+                    <div className="flex justify-between items-start">
+                      <div className="flex-1 cursor-pointer" onClick={() => handleSelectApi(api.id)}>
+                        <h4 className="font-semibold text-blue-700">{api.name}</h4>
+                        <p className="text-sm text-gray-600">Slug: {api.slug}</p>
+                        <p className="text-sm text-gray-500 truncate">{api.baseUrl}</p>
+                        <p className="text-xs text-gray-400 mt-1">
+                          {api.openapiSpec?.paths ? Object.keys(api.openapiSpec.paths).length : 0} endpoints
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => handleDeleteApi(api.id, api.name)}
+                        disabled={deletingId === api.id}
+                        className="ml-2 bg-red-100 text-red-700 px-3 py-1 rounded hover:bg-red-200 disabled:opacity-50 text-sm"
+                      >
+                        {deletingId === api.id ? "Deletando..." : "Deletar"}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Formulário para adicionar endpoint manual (se houver API selecionada) */}
           {selectedApi && token && (
             <div className="mt-6">
               <h3 className="text-xl font-semibold text-blue-600 mb-3">
@@ -173,7 +249,7 @@ export default function App() {
               <AddEndpointForm
                 apiId={selectedApi.id}
                 token={token}
-                onEndpointCreated={refreshApis}
+                onEndpointCreated={handleEndpointCreated}
               />
             </div>
           )}
@@ -196,7 +272,6 @@ export default function App() {
   );
 }
 
-// AuthForms (igual ao anterior, só adicionei type="email" e required)
 function AuthForms({ onLogin }: { onLogin: (token: string, user: User) => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");

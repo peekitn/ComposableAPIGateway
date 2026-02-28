@@ -4,12 +4,13 @@ import OpenAPISchemaValidator from "openapi-schema-validator";
 import https from "https";
 import axios from "axios";
 import jwt from "jsonwebtoken";
+import SwaggerParser from "@apidevtools/swagger-parser"; // 🔥 Import adicionado
 
 const JWT_SECRET = process.env.JWT_SECRET || "supersecret";
 const validator = new OpenAPISchemaValidator({ version: 3 });
 
 export async function apiRoutes(app: FastifyInstance) {
-  // ✅ LISTAR APIs do usuário logado (verificação manual)
+  // LISTAR APIs
   app.get("/apis", async (request: any, reply) => {
     try {
       const auth = request.headers.authorization;
@@ -30,7 +31,7 @@ export async function apiRoutes(app: FastifyInstance) {
     }
   });
 
-  // ✅ CRIAR API COM FETCH AUTOMÁTICO DO OPENAPI
+  // CRIAR API (agora com suporte a Swagger 2.0)
   app.post("/apis", async (request: any, reply) => {
     try {
       const auth = request.headers.authorization;
@@ -52,26 +53,41 @@ export async function apiRoutes(app: FastifyInstance) {
         try {
           const response = await axios.get(openapiUrl);
           openapiSpec = response.data;
+          console.log("📥 OpenAPI obtido da URL:", JSON.stringify(openapiSpec, null, 2));
         } catch (err: any) {
           console.error("Erro ao buscar OpenAPI:", err.message);
           return reply.status(400).send({ error: "Não foi possível buscar OpenAPI da URL" });
         }
       }
 
-      if (openapiSpec) {
+      // Se não veio spec, cria um vazio
+      if (!openapiSpec) {
+        openapiSpec = { openapi: "3.0.0", info: { title: name, version: "1.0.0" }, paths: {} };
+      }
+
+      // 🔥 Validação com fallback para Swagger 2.0
+      try {
+        // Tenta validar como OpenAPI 3.0
         const result = validator.validate(openapiSpec);
         if (result.errors.length > 0) {
-          return reply
-            .status(400)
-            .send({ error: "OpenAPI inválida", details: result.errors });
+          // Se falhou, tenta como Swagger 2.0
+          console.log("OpenAPI 3.0 inválido, tentando como Swagger 2.0");
+          const swagger2Spec = await SwaggerParser.validate(openapiSpec);
+          // Substitui pela spec validada (pode ser Swagger 2.0)
+          openapiSpec = swagger2Spec;
         }
-      } else {
-        openapiSpec = { paths: {} };
+      } catch (err) {
+        console.error("Erro ao validar especificação:", err);
+        return reply.status(400).send({
+          error: "Especificação inválida (não é OpenAPI 3.0 nem Swagger 2.0 válido)",
+        });
       }
 
       const api = await prisma.api.create({
         data: { name, slug, baseUrl, openapiSpec, userId },
       });
+
+      console.log("💾 API salva com openapiSpec:", JSON.stringify(api.openapiSpec, null, 2));
 
       return reply.status(201).send(api);
     } catch (err: any) {
@@ -80,7 +96,7 @@ export async function apiRoutes(app: FastifyInstance) {
     }
   });
 
-  // ✅ BUSCAR API POR ID (COM OPENAPI COMPLETA)
+  // BUSCAR API POR ID
   app.get("/apis/:id", async (request: any, reply) => {
     try {
       const auth = request.headers.authorization;
@@ -106,7 +122,7 @@ export async function apiRoutes(app: FastifyInstance) {
     }
   });
 
-  // ✅ PROXY DINÂMICO COM LOGS
+  // PROXY
   app.all("/proxy/:slug/*", async (request: any, reply) => {
     try {
       const auth = request.headers.authorization;
@@ -123,11 +139,10 @@ export async function apiRoutes(app: FastifyInstance) {
       const queryString = Object.keys(query).length ? "?" + new URLSearchParams(query).toString() : "";
 
       const api = await prisma.api.findFirst({
-        where: { slug, userId }, // garante que a API pertence ao usuário
+        where: { slug, userId },
       });
       if (!api) return reply.status(404).send({ error: "API não encontrada" });
 
-      // Filtrar headers permitidos
       const allowedHeaders = ["content-type", "accept", "authorization", "user-agent"];
       const headers: Record<string, string> = {};
       for (const [key, value] of Object.entries(request.headers)) {
@@ -144,7 +159,6 @@ export async function apiRoutes(app: FastifyInstance) {
         httpsAgent: new https.Agent({ rejectUnauthorized: false }),
       });
 
-      // Limitar tamanho do log
       const responseData = JSON.stringify(response.data);
       const truncatedResponse = responseData.length > 10000
         ? { truncated: true, data: responseData.slice(0, 10000) + "..." }
@@ -167,11 +181,10 @@ export async function apiRoutes(app: FastifyInstance) {
       const errorResponse = err.response?.data || { error: err.message };
       const errorStatus = err.response?.status || 500;
 
-      // Tenta salvar log mesmo no erro
       try {
         await prisma.requestLog.create({
           data: {
-            apiId: err.config?.apiId || "unknown", // Não temos apiId fácil aqui; idealmente teria
+            apiId: err.config?.apiId || "unknown",
             method: err.config?.method || "UNKNOWN",
             path: err.config?.url || "",
             body: err.config?.data || null,
@@ -188,7 +201,7 @@ export async function apiRoutes(app: FastifyInstance) {
     }
   });
 
-  // ✅ ADICIONAR ENDPOINT MANUAL
+  // ADICIONAR ENDPOINT MANUAL
   app.post("/apis/:apiId/endpoints", async (request: any, reply) => {
     try {
       const auth = request.headers.authorization;
@@ -201,7 +214,6 @@ export async function apiRoutes(app: FastifyInstance) {
       const { apiId } = request.params;
       const { method, path, description } = request.body;
 
-      // Verifica se API pertence ao usuário
       const api = await prisma.api.findFirst({
         where: { id: apiId, userId }
       });
@@ -209,12 +221,7 @@ export async function apiRoutes(app: FastifyInstance) {
       if (!api) return reply.status(404).send({ error: "API não encontrada" });
 
       const endpoint = await prisma.endpoint.create({
-        data: {
-          method,
-          path,
-          description,
-          apiId
-        }
+        data: { method, path, description, apiId }
       });
 
       return endpoint;
@@ -222,4 +229,71 @@ export async function apiRoutes(app: FastifyInstance) {
       return reply.status(401).send({ error: "Token inválido" });
     }
   });
+
+  // LISTAR ENDPOINTS MANUAIS
+  app.get("/apis/:apiId/endpoints", async (request: any, reply) => {
+    try {
+      const auth = request.headers.authorization;
+      if (!auth) return reply.status(401).send({ error: "Token ausente" });
+
+      const token = auth.replace("Bearer ", "");
+      const decoded = jwt.verify(token, JWT_SECRET) as any;
+      const userId = decoded.id;
+
+      const { apiId } = request.params;
+
+      const api = await prisma.api.findFirst({
+        where: { id: apiId, userId },
+      });
+
+      if (!api) return reply.status(404).send({ error: "API não encontrada" });
+
+      const endpoints = await prisma.endpoint.findMany({
+        where: { apiId },
+        orderBy: { createdAt: "asc" },
+      });
+
+      return endpoints;
+    } catch (err) {
+      return reply.status(401).send({ error: "Token inválido" });
+    }
+  });
+
+  // DELETAR API
+app.delete("/apis/:id", async (request: any, reply) => {
+  try {
+    const auth = request.headers.authorization;
+    if (!auth) return reply.status(401).send({ error: "Token ausente" });
+
+    const token = auth.replace("Bearer ", "");
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    const userId = decoded.id;
+
+    const { id } = request.params;
+
+    // Verifica se a API pertence ao usuário
+    const api = await prisma.api.findFirst({
+      where: { id, userId },
+    });
+
+    if (!api) {
+      return reply.status(404).send({ error: "API não encontrada" });
+    }
+
+    // Opcional: deletar também os endpoints e logs relacionados?
+    // Como temos onDelete: Cascade? No schema, não definimos cascade.
+    // Para evitar órfãos, vamos deletar manualmente os endpoints e logs.
+    await prisma.$transaction([
+      prisma.endpoint.deleteMany({ where: { apiId: id } }),
+      prisma.requestLog.deleteMany({ where: { apiId: id } }),
+      prisma.api.delete({ where: { id } }),
+    ]);
+
+    return reply.status(204).send();
+  } catch (err) {
+    console.error(err);
+    return reply.status(500).send({ error: "Erro ao deletar API" });
+  }
+});
+
 }

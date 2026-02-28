@@ -19,7 +19,6 @@ export function CreateApiForm({ onCreated }: Props) {
     setError("");
     setSuccess("");
 
-    // Validação simples
     if (!name.trim() || !slug.trim() || !baseUrl.trim()) {
       setError("Nome, Slug e Base URL são obrigatórios");
       return;
@@ -28,11 +27,20 @@ export function CreateApiForm({ onCreated }: Props) {
     setLoadingCreate(true);
 
     try {
-      let openapiSpec = { openapi: "3.0.0", info: { title: name, version: "1.0.0" }, paths: {} };
+      let openapiSpec;
+
       if (openapiUrl) {
+        console.log("📤 Fetching OpenAPI from URL:", openapiUrl);
         const res = await fetch(openapiUrl);
-        if (!res.ok) throw new Error("Falha ao buscar OpenAPI");
+        if (!res.ok) {
+          throw new Error(`Falha ao buscar OpenAPI: ${res.status} ${res.statusText}`);
+        }
         openapiSpec = await res.json();
+        console.log("📥 OpenAPI obtido da URL:", JSON.stringify(openapiSpec, null, 2));
+      } else {
+        // Se não forneceu URL, cria um spec vazio
+        openapiSpec = { openapi: "3.0.0", info: { title: name, version: "1.0.0" }, paths: {} };
+        console.log("📦 Usando OpenAPI padrão (vazio)");
       }
 
       await createApi({ name, slug, baseUrl, openapi: openapiSpec });
@@ -40,6 +48,7 @@ export function CreateApiForm({ onCreated }: Props) {
       if (onCreated) onCreated();
       setName(""); setSlug(""); setBaseUrl(""); setOpenapiUrl("");
     } catch (err: any) {
+      console.error("Erro na criação da API:", err);
       setError("Erro ao criar API: " + err.message);
     } finally {
       setLoadingCreate(false);

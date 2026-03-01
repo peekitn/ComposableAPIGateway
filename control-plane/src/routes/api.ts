@@ -295,5 +295,40 @@ app.delete("/apis/:id", async (request: any, reply) => {
     return reply.status(500).send({ error: "Erro ao deletar API" });
   }
 });
+  // CONFIGURAR AUTENTICAÇÃO DA API
+app.put("/apis/:id/auth", async (request: any, reply) => {
+  try {
+    const auth = request.headers.authorization;
+    if (!auth) return reply.status(401).send({ error: "Token ausente" });
 
+    const token = auth.replace("Bearer ", "");
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    const userId = decoded.id;
+
+    const { id } = request.params;
+    const { authConfig } = request.body; // { type, token, key, in, name }
+
+    // Verifica se a API pertence ao usuário
+    const api = await prisma.api.findFirst({
+      where: { id, userId },
+    });
+
+    if (!api) return reply.status(404).send({ error: "API não encontrada" });
+
+    // Validação básica do authConfig
+    if (authConfig && typeof authConfig === "object") {
+      // Pode adicionar validações conforme o tipo
+    }
+
+    const updatedApi = await prisma.api.update({
+      where: { id },
+      data: { authConfig },
+    });
+
+    return reply.send(updatedApi);
+  } catch (err) {
+    console.error(err);
+    return reply.status(500).send({ error: "Erro ao salvar configuração de autenticação" });
+  }
+});
 }

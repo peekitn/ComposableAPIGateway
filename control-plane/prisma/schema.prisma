@@ -24,6 +24,7 @@ model Api {
   slug        String   @unique
   baseUrl     String
   openapiSpec Json
+  authConfig  Json?    // { type: "bearer", token: "xxx" } ou { type: "apikey", key: "xxx", in: "header", name: "X-API-Key" }
   userId      String?   // <- torna opcional
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

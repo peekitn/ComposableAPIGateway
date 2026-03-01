@@ -4,6 +4,7 @@ import { CreateApiForm } from "./pages/CreateApi";
 import { ProxyTest } from "./pages/ProxyTest";
 import { AddEndpointForm } from "./pages/AddEndpoint";
 import { API_BASE_URL } from "./config";
+import { AuthConfig } from "./pages/AuthConfig";
 
 type Api = {
   id: string;
@@ -253,6 +254,32 @@ export default function App() {
               />
             </div>
           )}
+
+          {selectedApi && token && (
+  <>
+    <div className="mt-6">
+      <h3 className="text-xl font-semibold text-blue-600 mb-3">
+        Adicionar Endpoint Manualmente
+      </h3>
+      <AddEndpointForm
+        apiId={selectedApi.id}
+        token={token}
+        onEndpointCreated={handleEndpointCreated}
+      />
+    </div>
+
+    {/* 🔥 Componente de configuração de autenticação */}
+    <AuthConfig
+      apiId={selectedApi.id}
+      token={token}
+      onConfigSaved={() => {
+        // Opcional: recarrega a API selecionada para mostrar a config
+        handleSelectApi(selectedApi.id);
+      }}
+    />
+  </>
+)}
+
         </section>
 
         <section className="bg-white p-6 rounded-xl shadow-lg">

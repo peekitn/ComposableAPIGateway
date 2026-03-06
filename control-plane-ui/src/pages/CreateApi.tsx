@@ -8,6 +8,7 @@ type Props = {
 export function CreateApiForm({ onCreated }: Props) {
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
+  const [version, setVersion] = useState("v1");
   const [baseUrl, setBaseUrl] = useState("");
   const [openapiUrl, setOpenapiUrl] = useState("");
   const [loadingCreate, setLoadingCreate] = useState(false);
@@ -38,15 +39,14 @@ export function CreateApiForm({ onCreated }: Props) {
         openapiSpec = await res.json();
         console.log("📥 OpenAPI obtido da URL:", JSON.stringify(openapiSpec, null, 2));
       } else {
-        // Se não forneceu URL, cria um spec vazio
         openapiSpec = { openapi: "3.0.0", info: { title: name, version: "1.0.0" }, paths: {} };
         console.log("📦 Usando OpenAPI padrão (vazio)");
       }
 
-      await createApi({ name, slug, baseUrl, openapi: openapiSpec });
+      await createApi({ name, slug, version, baseUrl, openapi: openapiSpec });
       setSuccess("API criada com sucesso!");
       if (onCreated) onCreated();
-      setName(""); setSlug(""); setBaseUrl(""); setOpenapiUrl("");
+      setName(""); setSlug(""); setVersion("v1"); setBaseUrl(""); setOpenapiUrl("");
     } catch (err: any) {
       console.error("Erro na criação da API:", err);
       setError("Erro ao criar API: " + err.message);
@@ -74,6 +74,12 @@ export function CreateApiForm({ onCreated }: Props) {
           value={slug}
           onChange={e => setSlug(e.target.value)}
           required
+        />
+        <input
+          className="w-full border rounded px-3 py-2"
+          placeholder="Versão (ex: v1)"
+          value={version}
+          onChange={e => setVersion(e.target.value)}
         />
         <input
           className="w-full border rounded px-3 py-2"

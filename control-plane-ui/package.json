@@ -12,6 +12,7 @@
   "dependencies": {
     "@apidevtools/swagger-parser": "^12.1.0",
     "@tanstack/react-query": "^5.90.21",
+    "@uiw/react-json-view": "^2.0.0-alpha.41",
     "axios": "^1.13.5",
     "jsonwebtoken": "^9.0.3",
     "react": "^19.2.0",

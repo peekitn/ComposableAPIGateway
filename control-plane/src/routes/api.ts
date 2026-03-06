@@ -40,7 +40,6 @@ try {
     console.log('✅ Redis connected successfully');
   });
 
-  // Tenta conectar
   redisClient.connect().catch((err) => {
     console.error('❌ Could not connect to Redis:', err.message);
     console.log('❌ Usando fallback de memória');
@@ -160,7 +159,7 @@ async function getOAuthToken(config: any): Promise<string> {
 }
 
 export async function apiRoutes(app: FastifyInstance) {
-  // LISTAR APIs
+  // LISTAR APIs (agora ordena por nome e versão)
   app.get("/apis", async (request: any, reply) => {
     try {
       const auth = request.headers.authorization;
@@ -172,7 +171,10 @@ export async function apiRoutes(app: FastifyInstance) {
 
       const apis = await prisma.api.findMany({
         where: { userId },
-        orderBy: { createdAt: "desc" },
+        orderBy: [
+          { name: "asc" },
+          { version: "asc" }
+        ],
       });
 
       return apis;
@@ -181,7 +183,7 @@ export async function apiRoutes(app: FastifyInstance) {
     }
   });
 
-  // CRIAR API
+  // CRIAR API (agora com suporte a versão)
   app.post("/apis", async (request: any, reply) => {
     try {
       const auth = request.headers.authorization;
@@ -191,11 +193,13 @@ export async function apiRoutes(app: FastifyInstance) {
       const decoded = jwt.verify(token, JWT_SECRET) as any;
       const userId = decoded.id;
 
-      const { name, slug, baseUrl, openapi, openapiUrl } = request.body;
+      const { name, slug, version, baseUrl, openapi, openapiUrl } = request.body;
 
       if (!name || !slug || !baseUrl) {
         return reply.status(400).send({ error: "Missing fields" });
       }
+
+      const apiVersion = version || "v1";
 
       let openapiSpec: any = openapi || null;
 
@@ -229,10 +233,17 @@ export async function apiRoutes(app: FastifyInstance) {
       }
 
       const api = await prisma.api.create({
-        data: { name, slug, baseUrl, openapiSpec, userId },
+        data: { 
+          name, 
+          slug, 
+          version: apiVersion,
+          baseUrl, 
+          openapiSpec, 
+          userId 
+        },
       });
 
-      console.log("💾 API salva com openapiSpec:", JSON.stringify(api.openapiSpec, null, 2));
+      console.log(`💾 API salva com openapiSpec e versão: ${apiVersion}`);
 
       return reply.status(201).send(api);
     } catch (err: any) {
@@ -267,9 +278,9 @@ export async function apiRoutes(app: FastifyInstance) {
     }
   });
 
-  // PROXY COM RATE LIMIT
+  // PROXY COM SUPORTE A VERSÃO E RATE LIMIT
   app.register(async function (proxyRoutes) {
-    // Hook para buscar a API
+    // Hook para buscar a API (agora com suporte a versão na URL)
     proxyRoutes.addHook('preHandler', async (request: any, reply) => {
       const auth = request.headers.authorization;
       if (!auth) return reply.status(401).send({ error: "Token ausente" });
@@ -280,16 +291,42 @@ export async function apiRoutes(app: FastifyInstance) {
 
       const fullPath = request.params["*"] || "";
       const parts = fullPath.split('/');
-      const slug = parts[0];
-      const remainingPath = parts.slice(1).join('/');
+      
+      // Formato esperado: [slug, version?, ...resto]
+      // Ex: "payments/v1/charge" => slug="payments", version="v1", path="charge"
+      let slug, version, remainingPath;
+      
+      if (parts.length >= 2 && parts[1].startsWith('v')) {
+        slug = parts[0];
+        version = parts[1];
+        remainingPath = parts.slice(2).join('/');
+      } else {
+        slug = parts[0];
+        version = null;
+        remainingPath = parts.slice(1).join('/');
+      }
 
       if (!slug) return reply.status(404).send({ error: "Slug não fornecido" });
 
-      console.log(`🔍 Buscando API com slug: ${slug} para usuário ${userId}`);
-      const api = await prisma.api.findFirst({ where: { slug, userId } });
+      console.log(`🔍 Buscando API com slug: ${slug}, versão: ${version || 'latest'} para usuário ${userId}`);
+
+      let api;
+      if (version) {
+        // Versão específica
+        api = await prisma.api.findFirst({ 
+          where: { slug, version, userId }
+        });
+      } else {
+        // Sem versão: busca a mais recente (última criada)
+        api = await prisma.api.findFirst({ 
+          where: { slug, userId },
+          orderBy: { version: 'desc' }
+        });
+      }
+
       if (!api) return reply.status(404).send({ error: "API não encontrada" });
 
-      console.log(`✅ API encontrada: ${api.name} (${api.id})`);
+      console.log(`✅ API encontrada: ${api.name} (${api.id}) versão ${api.version}`);
       request.api = api;
       request.remainingPath = remainingPath;
     });
@@ -367,7 +404,7 @@ export async function apiRoutes(app: FastifyInstance) {
         const queryString = finalQuery.toString();
         const finalUrl = `${api.baseUrl}/${path}${queryString ? '?' + queryString : ''}`;
 
-        console.log("🔗 Proxy chamando:", finalUrl);
+        console.log(`🔗 Proxy chamando (versão ${api.version}):`, finalUrl);
 
         const response = await axios({
           method: request.method,
@@ -578,4 +615,50 @@ export async function apiRoutes(app: FastifyInstance) {
       return reply.status(500).send({ error: "Erro ao salvar configuração de rate limit" });
     }
   });
+
+  // ATUALIZAR OPENAPI SPEC
+app.put("/apis/:id/openapi", async (request: any, reply) => {
+  try {
+    const auth = request.headers.authorization;
+    if (!auth) return reply.status(401).send({ error: "Token ausente" });
+
+    const token = auth.replace("Bearer ", "");
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    const userId = decoded.id;
+
+    const { id } = request.params;
+    const { openapiSpec } = request.body;
+
+    // Verifica se a API pertence ao usuário
+    const api = await prisma.api.findFirst({
+      where: { id, userId },
+    });
+
+    if (!api) return reply.status(404).send({ error: "API não encontrada" });
+
+    // Valida a nova spec (opcional, mas recomendado)
+    try {
+      const result = validator.validate(openapiSpec);
+      if (result.errors.length > 0) {
+        return reply.status(400).send({ 
+          error: "OpenAPI inválida", 
+          details: result.errors 
+        });
+      }
+    } catch (err) {
+      return reply.status(400).send({ error: "OpenAPI inválida" });
+    }
+
+    const updatedApi = await prisma.api.update({
+      where: { id },
+      data: { openapiSpec },
+    });
+
+    return reply.send(updatedApi);
+  } catch (err) {
+    console.error(err);
+    return reply.status(500).send({ error: "Erro ao salvar OpenAPI" });
+  }
+});
+
 }

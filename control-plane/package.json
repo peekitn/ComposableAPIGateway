@@ -17,6 +17,7 @@
     "@apidevtools/swagger-parser": "^12.1.0",
     "@fastify/cors": "^11.2.0",
     "@fastify/rate-limit": "^10.3.0",
+    "@fastify/routes": "^6.0.2",
     "@prisma/client": "5.10.2",
     "axios": "^1.13.5",
     "bcrypt": "^6.0.0",

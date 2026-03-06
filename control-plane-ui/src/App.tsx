@@ -5,12 +5,14 @@ import { ProxyTest } from "./pages/ProxyTest";
 import { AddEndpointForm } from "./pages/AddEndpoint";
 import { API_BASE_URL } from "./config";
 import { AuthConfig } from "./pages/AuthConfig";
-import { RateLimitConfig } from "./pages/RateLimitConfig"; // <-- Import adicionado
+import { RateLimitConfig } from "./pages/RateLimitConfig";
+import { OpenAPIEditor } from "./pages/OpenApiEditor";
 
 type Api = {
   id: string;
   name: string;
   slug: string;
+  version?: string; // <-- adicionado
   baseUrl: string;
   openapiSpec?: any;
 };
@@ -195,7 +197,7 @@ export default function App() {
                 <option value="">-- Selecione a API --</option>
                 {apis.map((api) => (
                   <option key={api.id} value={api.id}>
-                    {api.name} ({api.slug})
+                    {api.name} ({api.slug}) {api.version ? `- ${api.version}` : ''}
                   </option>
                 ))}
               </select>
@@ -218,7 +220,9 @@ export default function App() {
                     <div className="flex justify-between items-start">
                       <div className="flex-1 cursor-pointer" onClick={() => handleSelectApi(api.id)}>
                         <h4 className="font-semibold text-blue-700">{api.name}</h4>
-                        <p className="text-sm text-gray-600">Slug: {api.slug}</p>
+                        <p className="text-sm text-gray-600">
+                          Slug: {api.slug} | Versão: {api.version || 'v1'}
+                        </p>
                         <p className="text-sm text-gray-500 truncate">{api.baseUrl}</p>
                         <p className="text-xs text-gray-400 mt-1">
                           {api.openapiSpec?.paths ? Object.keys(api.openapiSpec.paths).length : 0} endpoints
@@ -262,7 +266,6 @@ export default function App() {
                 />
               </div>
 
-              {/* NOVO: Componente de Rate Limit */}
               <div>
                 <h3 className="text-xl font-semibold text-blue-600 mb-3">
                   Limite de Requisições (Rate Limit)
@@ -273,22 +276,34 @@ export default function App() {
                   onConfigSaved={() => handleSelectApi(selectedApi.id)}
                 />
               </div>
+
+              {/* 🔥 NOVO: Editor OpenAPI */}
+              <div>
+                <h3 className="text-xl font-semibold text-blue-600 mb-3">
+                  Editor OpenAPI
+                </h3>
+                <OpenAPIEditor
+                  apiId={selectedApi.id}
+                  token={token}
+                  onSaved={() => handleSelectApi(selectedApi.id)}
+                />
+              </div>
             </div>
           )}
         </section>
 
         <section className="bg-white p-6 rounded-xl shadow-lg">
-  <h2 className="text-2xl font-semibold text-blue-700 mb-4">
-    Testar Proxy
-  </h2>
-  {selectedApi ? (
-    <ProxyTest key={selectedApi.id} api={selectedApi} /> 
-  ) : (
-    <p className="text-gray-500">
-      Selecione uma API acima para testar o proxy
-    </p>
-  )}
-</section>
+          <h2 className="text-2xl font-semibold text-blue-700 mb-4">
+            Testar Proxy
+          </h2>
+          {selectedApi ? (
+            <ProxyTest key={selectedApi.id} api={selectedApi} /> 
+          ) : (
+            <p className="text-gray-500">
+              Selecione uma API acima para testar o proxy
+            </p>
+          )}
+        </section>
       </main>
     </div>
   );

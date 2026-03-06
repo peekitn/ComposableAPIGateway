@@ -21,7 +21,8 @@ model User {
 model Api {
   id          String   @id @default(uuid())
   name        String
-  slug        String   @unique
+  slug        String   
+  version     String   @default("v1")  // <-- NOVO CAMPO
   baseUrl     String
   openapiSpec Json
   authConfig  Json?    // { type: "bearer", token: "xxx" } ou { type: "apikey", key: "xxx", in: "header", name: "X-API-Key" }
@@ -34,6 +35,7 @@ model Api {
   endpoints Endpoint[]
 
   user User? @relation(fields: [userId], references: [id])
+  @@unique([slug, version])
 }
 
 model RequestLog {

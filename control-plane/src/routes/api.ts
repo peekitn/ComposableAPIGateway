@@ -4,10 +4,62 @@ import OpenAPISchemaValidator from "openapi-schema-validator";
 import https from "https";
 import axios from "axios";
 import jwt from "jsonwebtoken";
-import SwaggerParser from "@apidevtools/swagger-parser"; // 🔥 Import adicionado
+import SwaggerParser from "@apidevtools/swagger-parser";
+import rateLimit from '@fastify/rate-limit';
 
 const JWT_SECRET = process.env.JWT_SECRET || "supersecret";
 const validator = new OpenAPISchemaValidator({ version: 3 });
+
+// Cache simples para tokens OAuth2 (em memória)
+const oauthTokenCache: Record<string, { token: string; expiresAt: number }> = {};
+
+async function getOAuthToken(config: any): Promise<string> {
+  const cacheKey = `${config.clientId}:${config.tokenUrl}`;
+  const cached = oauthTokenCache[cacheKey];
+  if (cached && cached.expiresAt > Date.now()) {
+    console.log("✅ Usando token OAuth2 em cache");
+    return cached.token;
+  }
+
+  console.log("📤 Solicitando token OAuth2 para:", config.tokenUrl);
+  console.log("📤 Client ID:", config.clientId);
+  console.log("📤 Config completa:", JSON.stringify(config, null, 2));
+  console.log("📤 Audience recebida:", config.audience);
+
+  // Monta payload em JSON
+  const payload: any = {
+    grant_type: 'client_credentials',
+    client_id: config.clientId,
+    client_secret: config.clientSecret,
+  };
+  if (config.audience) {
+    payload.audience = config.audience;
+  }
+  if (config.scopes && config.scopes.length) {
+    payload.scope = config.scopes.join(' ');
+  }
+
+  console.log("📤 Payload enviado (JSON):", JSON.stringify(payload, null, 2));
+
+  try {
+    const response = await axios.post(config.tokenUrl, payload, {
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const token = response.data.access_token;
+    const expiresIn = response.data.expires_in || 3600;
+    oauthTokenCache[cacheKey] = {
+      token,
+      expiresAt: Date.now() + expiresIn * 1000,
+    };
+    console.log("✅ Token OAuth2 obtido com sucesso, expira em", expiresIn, "s");
+    return token;
+  } catch (err: any) {
+    console.error('❌ Erro ao obter token OAuth2. Status:', err.response?.status);
+    console.error('❌ Dados da resposta:', err.response?.data);
+    throw new Error('Falha na autenticação OAuth2');
+  }
+}
 
 export async function apiRoutes(app: FastifyInstance) {
   // LISTAR APIs
@@ -31,7 +83,7 @@ export async function apiRoutes(app: FastifyInstance) {
     }
   });
 
-  // CRIAR API (agora com suporte a Swagger 2.0)
+  // CRIAR API
   app.post("/apis", async (request: any, reply) => {
     try {
       const auth = request.headers.authorization;
@@ -60,20 +112,15 @@ export async function apiRoutes(app: FastifyInstance) {
         }
       }
 
-      // Se não veio spec, cria um vazio
       if (!openapiSpec) {
         openapiSpec = { openapi: "3.0.0", info: { title: name, version: "1.0.0" }, paths: {} };
       }
 
-      // 🔥 Validação com fallback para Swagger 2.0
       try {
-        // Tenta validar como OpenAPI 3.0
         const result = validator.validate(openapiSpec);
         if (result.errors.length > 0) {
-          // Se falhou, tenta como Swagger 2.0
           console.log("OpenAPI 3.0 inválido, tentando como Swagger 2.0");
           const swagger2Spec = await SwaggerParser.validate(openapiSpec);
-          // Substitui pela spec validada (pode ser Swagger 2.0)
           openapiSpec = swagger2Spec;
         }
       } catch (err) {
@@ -122,39 +169,106 @@ export async function apiRoutes(app: FastifyInstance) {
     }
   });
 
-  // PROXY
-  app.all("/proxy/:slug/*", async (request: any, reply) => {
+  // PROXY COM RATE LIMIT CONFIGURÁVEL
+  app.register(async function (proxyRoutes) {
+  // Hook para buscar a API e anexar ao request
+  proxyRoutes.addHook('preHandler', async (request: any, reply) => {
+    const auth = request.headers.authorization;
+    if (!auth) return reply.status(401).send({ error: "Token ausente" });
+
+    const token = auth.replace("Bearer ", "");
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    const userId = decoded.id;
+
+    // Extrai o slug do path (primeiro segmento)
+    const fullPath = request.params["*"] || "";
+    const parts = fullPath.split('/');
+    const slug = parts[0];
+    const remainingPath = parts.slice(1).join('/');
+
+    if (!slug) return reply.status(404).send({ error: "Slug não fornecido" });
+
+    const api = await prisma.api.findFirst({ where: { slug, userId } });
+    if (!api) return reply.status(404).send({ error: "API não encontrada" });
+
+    request.api = api;
+    request.remainingPath = remainingPath; // armazena o path restante
+  });
+
+  // Aplica rate limit dinâmico baseado na configuração da API
+  proxyRoutes.register(rateLimit, {
+    keyGenerator: (request: any) => {
+      return `api_${request.api?.id || 'unknown'}_${request.ip}`;
+    },
+    max: (request: any) => {
+      if (request.api?.rateLimitConfig?.enabled) {
+        return request.api.rateLimitConfig.max;
+      }
+      return Number.MAX_SAFE_INTEGER;
+    },
+    timeWindow: (request: any) => {
+      return request.api?.rateLimitConfig?.enabled
+        ? request.api.rateLimitConfig.timeWindow
+        : '1 minute';
+    },
+    errorResponseBuilder: (request: any, context) => {
+      return {
+        error: 'Rate limit exceeded',
+        message: `Máximo de ${context.max} requisições por ${context.timeWindow}`,
+        statusCode: 429
+      };
+    }
+  });
+
+  // Define a rota proxy
+  proxyRoutes.all("/*", async (request: any, reply) => {
+    const api = request.api;
+    const path = request.remainingPath || ""; // usa o path sem o slug
+    const query = request.query;
+
     try {
-      const auth = request.headers.authorization;
-      if (!auth) return reply.status(401).send({ error: "Token ausente" });
+      let finalHeaders: Record<string, string> = {};
+      let finalQuery = new URLSearchParams(query);
 
-      const token = auth.replace("Bearer ", "");
-      const decoded = jwt.verify(token, JWT_SECRET) as any;
-      const userId = decoded.id;
-
-      const { slug } = request.params;
-      const path = request.params["*"] || "";
-      const query = request.query;
-
-      const queryString = Object.keys(query).length ? "?" + new URLSearchParams(query).toString() : "";
-
-      const api = await prisma.api.findFirst({
-        where: { slug, userId },
-      });
-      if (!api) return reply.status(404).send({ error: "API não encontrada" });
-
-      const allowedHeaders = ["content-type", "accept", "authorization", "user-agent"];
-      const headers: Record<string, string> = {};
-      for (const [key, value] of Object.entries(request.headers)) {
-        if (allowedHeaders.includes(key.toLowerCase()) && typeof value === "string") {
-          headers[key] = value;
+      // Aplica autenticação customizada
+      if (api.authConfig) {
+        const config = api.authConfig as any;
+        if (config.type === 'bearer' && config.token) {
+          finalHeaders['Authorization'] = `Bearer ${config.token}`;
+        } else if (config.type === 'apikey' && config.key && config.name) {
+          if (config.in === 'header') {
+            finalHeaders[config.name] = config.key;
+          } else if (config.in === 'query') {
+            finalQuery.append(config.name, config.key);
+          }
+        } else if (config.type === 'oauth2') {
+          try {
+            const oauthToken = await getOAuthToken(config);
+            finalHeaders['Authorization'] = `Bearer ${oauthToken}`;
+          } catch (err) {
+            console.error('Erro OAuth2:', err);
+            return reply.status(502).send({ error: 'Falha na autenticação OAuth2' });
+          }
         }
       }
 
+      // Repassa headers permitidos da requisição original
+      const allowedHeaders = ["content-type", "accept", "user-agent"];
+      for (const [key, value] of Object.entries(request.headers)) {
+        if (allowedHeaders.includes(key.toLowerCase()) && typeof value === "string") {
+          finalHeaders[key] = value;
+        }
+      }
+
+      const queryString = finalQuery.toString();
+      const finalUrl = `${api.baseUrl}/${path}${queryString ? '?' + queryString : ''}`;
+
+      console.log("🔗 Proxy chamando:", finalUrl, "com headers:", finalHeaders);
+
       const response = await axios({
         method: request.method,
-        url: `${api.baseUrl}/${path}${queryString}`,
-        headers,
+        url: finalUrl,
+        headers: finalHeaders,
         data: request.body,
         httpsAgent: new https.Agent({ rejectUnauthorized: false }),
       });
@@ -168,9 +282,9 @@ export async function apiRoutes(app: FastifyInstance) {
         data: {
           apiId: api.id,
           method: request.method,
-          path: path + queryString,
+          path: path + (queryString ? '?' + queryString : ''),
           body: request.body || null,
-          headers,
+          headers: finalHeaders,
           status: response.status,
           response: truncatedResponse,
         },
@@ -178,28 +292,32 @@ export async function apiRoutes(app: FastifyInstance) {
 
       reply.status(response.status).send(response.data);
     } catch (err: any) {
+      console.error("❌ Erro no proxy:", err);
       const errorResponse = err.response?.data || { error: err.message };
       const errorStatus = err.response?.status || 500;
 
-      try {
-        await prisma.requestLog.create({
-          data: {
-            apiId: err.config?.apiId || "unknown",
-            method: err.config?.method || "UNKNOWN",
-            path: err.config?.url || "",
-            body: err.config?.data || null,
-            headers: err.config?.headers || {},
-            status: errorStatus,
-            response: errorResponse,
-          },
-        });
-      } catch (logErr) {
-        console.error("Erro ao salvar log de erro:", logErr);
+      if (api?.id) {
+        try {
+          await prisma.requestLog.create({
+            data: {
+              apiId: api.id,
+              method: request.method,
+              path: path,
+              body: request.body || null,
+              headers: request.headers,
+              status: errorStatus,
+              response: errorResponse,
+            },
+          });
+        } catch (logErr) {
+          console.error("Erro ao salvar log de erro:", logErr);
+        }
       }
 
       reply.status(errorStatus).send(errorResponse);
     }
   });
+}, { prefix: "/proxy" });
 
   // ADICIONAR ENDPOINT MANUAL
   app.post("/apis/:apiId/endpoints", async (request: any, reply) => {
@@ -260,75 +378,97 @@ export async function apiRoutes(app: FastifyInstance) {
   });
 
   // DELETAR API
-app.delete("/apis/:id", async (request: any, reply) => {
-  try {
-    const auth = request.headers.authorization;
-    if (!auth) return reply.status(401).send({ error: "Token ausente" });
+  app.delete("/apis/:id", async (request: any, reply) => {
+    try {
+      const auth = request.headers.authorization;
+      if (!auth) return reply.status(401).send({ error: "Token ausente" });
 
-    const token = auth.replace("Bearer ", "");
-    const decoded = jwt.verify(token, JWT_SECRET) as any;
-    const userId = decoded.id;
+      const token = auth.replace("Bearer ", "");
+      const decoded = jwt.verify(token, JWT_SECRET) as any;
+      const userId = decoded.id;
 
-    const { id } = request.params;
+      const { id } = request.params;
 
-    // Verifica se a API pertence ao usuário
-    const api = await prisma.api.findFirst({
-      where: { id, userId },
-    });
+      const api = await prisma.api.findFirst({
+        where: { id, userId },
+      });
 
-    if (!api) {
-      return reply.status(404).send({ error: "API não encontrada" });
+      if (!api) {
+        return reply.status(404).send({ error: "API não encontrada" });
+      }
+
+      await prisma.$transaction([
+        prisma.endpoint.deleteMany({ where: { apiId: id } }),
+        prisma.requestLog.deleteMany({ where: { apiId: id } }),
+        prisma.api.delete({ where: { id } }),
+      ]);
+
+      return reply.status(204).send();
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: "Erro ao deletar API" });
     }
+  });
 
-    // Opcional: deletar também os endpoints e logs relacionados?
-    // Como temos onDelete: Cascade? No schema, não definimos cascade.
-    // Para evitar órfãos, vamos deletar manualmente os endpoints e logs.
-    await prisma.$transaction([
-      prisma.endpoint.deleteMany({ where: { apiId: id } }),
-      prisma.requestLog.deleteMany({ where: { apiId: id } }),
-      prisma.api.delete({ where: { id } }),
-    ]);
-
-    return reply.status(204).send();
-  } catch (err) {
-    console.error(err);
-    return reply.status(500).send({ error: "Erro ao deletar API" });
-  }
-});
   // CONFIGURAR AUTENTICAÇÃO DA API
-app.put("/apis/:id/auth", async (request: any, reply) => {
-  try {
-    const auth = request.headers.authorization;
-    if (!auth) return reply.status(401).send({ error: "Token ausente" });
+  app.put("/apis/:id/auth", async (request: any, reply) => {
+    try {
+      const auth = request.headers.authorization;
+      if (!auth) return reply.status(401).send({ error: "Token ausente" });
 
-    const token = auth.replace("Bearer ", "");
-    const decoded = jwt.verify(token, JWT_SECRET) as any;
-    const userId = decoded.id;
+      const token = auth.replace("Bearer ", "");
+      const decoded = jwt.verify(token, JWT_SECRET) as any;
+      const userId = decoded.id;
 
-    const { id } = request.params;
-    const { authConfig } = request.body; // { type, token, key, in, name }
+      const { id } = request.params;
+      const { authConfig } = request.body;
 
-    // Verifica se a API pertence ao usuário
-    const api = await prisma.api.findFirst({
-      where: { id, userId },
-    });
+      const api = await prisma.api.findFirst({
+        where: { id, userId },
+      });
 
-    if (!api) return reply.status(404).send({ error: "API não encontrada" });
+      if (!api) return reply.status(404).send({ error: "API não encontrada" });
 
-    // Validação básica do authConfig
-    if (authConfig && typeof authConfig === "object") {
-      // Pode adicionar validações conforme o tipo
+      const updatedApi = await prisma.api.update({
+        where: { id },
+        data: { authConfig },
+      });
+
+      return reply.send(updatedApi);
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: "Erro ao salvar configuração de autenticação" });
     }
+  });
 
-    const updatedApi = await prisma.api.update({
-      where: { id },
-      data: { authConfig },
-    });
+  // CONFIGURAR RATE LIMIT DA API
+  app.put("/apis/:id/rate-limit", async (request: any, reply) => {
+    try {
+      const auth = request.headers.authorization;
+      if (!auth) return reply.status(401).send({ error: "Token ausente" });
 
-    return reply.send(updatedApi);
-  } catch (err) {
-    console.error(err);
-    return reply.status(500).send({ error: "Erro ao salvar configuração de autenticação" });
-  }
-});
+      const token = auth.replace("Bearer ", "");
+      const decoded = jwt.verify(token, JWT_SECRET) as any;
+      const userId = decoded.id;
+
+      const { id } = request.params;
+      const { rateLimitConfig } = request.body; // { enabled: true, max: 100, timeWindow: "1 minute" }
+
+      const api = await prisma.api.findFirst({
+        where: { id, userId },
+      });
+
+      if (!api) return reply.status(404).send({ error: "API não encontrada" });
+
+      const updatedApi = await prisma.api.update({
+        where: { id },
+        data: { rateLimitConfig },
+      });
+
+      return reply.send(updatedApi);
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: "Erro ao salvar configuração de rate limit" });
+    }
+  });
 }

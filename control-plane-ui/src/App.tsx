@@ -5,6 +5,7 @@ import { ProxyTest } from "./pages/ProxyTest";
 import { AddEndpointForm } from "./pages/AddEndpoint";
 import { API_BASE_URL } from "./config";
 import { AuthConfig } from "./pages/AuthConfig";
+import { RateLimitConfig } from "./pages/RateLimitConfig"; // <-- Import adicionado
 
 type Api = {
   id: string;
@@ -68,7 +69,6 @@ export default function App() {
     }
   };
 
-  // Função para deletar API
   const handleDeleteApi = async (apiId: string, apiName: string) => {
     if (!window.confirm(`Tem certeza que deseja deletar a API "${apiName}"?`)) {
       return;
@@ -79,11 +79,10 @@ export default function App() {
       await axios.delete(`${API_BASE_URL}/apis/${apiId}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      // Se a API deletada for a selecionada, limpar seleção
       if (selectedApi?.id === apiId) {
         setSelectedApi(null);
       }
-      await refreshApis(); // Atualiza lista
+      await refreshApis();
     } catch (err: any) {
       console.error("Erro ao deletar API", err);
       alert("Erro ao deletar API: " + (err.response?.data?.error || err.message));
@@ -183,7 +182,6 @@ export default function App() {
             APIs Cadastradas
           </h2>
 
-          {/* Select para selecionar API */}
           {apis.length > 0 ? (
             <div className="mb-6">
               <label className="block mb-2 font-medium text-gray-700">
@@ -206,7 +204,6 @@ export default function App() {
             <p className="text-gray-500 mb-4">Nenhuma API cadastrada</p>
           )}
 
-          {/* Lista de APIs em cards com botão deletar */}
           {apis.length > 0 && (
             <div>
               <h3 className="text-lg font-semibold text-gray-700 mb-3">Suas APIs</h3>
@@ -241,59 +238,57 @@ export default function App() {
             </div>
           )}
 
-          {/* Formulário para adicionar endpoint manual (se houver API selecionada) */}
           {selectedApi && token && (
-            <div className="mt-6">
-              <h3 className="text-xl font-semibold text-blue-600 mb-3">
-                Adicionar Endpoint Manualmente
-              </h3>
-              <AddEndpointForm
-                apiId={selectedApi.id}
-                token={token}
-                onEndpointCreated={handleEndpointCreated}
-              />
+            <div className="mt-8 space-y-6">
+              <div>
+                <h3 className="text-xl font-semibold text-blue-600 mb-3">
+                  Adicionar Endpoint Manualmente
+                </h3>
+                <AddEndpointForm
+                  apiId={selectedApi.id}
+                  token={token}
+                  onEndpointCreated={handleEndpointCreated}
+                />
+              </div>
+
+              <div>
+                <h3 className="text-xl font-semibold text-blue-600 mb-3">
+                  Configuração de Autenticação
+                </h3>
+                <AuthConfig
+                  apiId={selectedApi.id}
+                  token={token}
+                  onConfigSaved={() => handleSelectApi(selectedApi.id)}
+                />
+              </div>
+
+              {/* NOVO: Componente de Rate Limit */}
+              <div>
+                <h3 className="text-xl font-semibold text-blue-600 mb-3">
+                  Limite de Requisições (Rate Limit)
+                </h3>
+                <RateLimitConfig
+                  apiId={selectedApi.id}
+                  token={token}
+                  onConfigSaved={() => handleSelectApi(selectedApi.id)}
+                />
+              </div>
             </div>
           )}
-
-          {selectedApi && token && (
-  <>
-    <div className="mt-6">
-      <h3 className="text-xl font-semibold text-blue-600 mb-3">
-        Adicionar Endpoint Manualmente
-      </h3>
-      <AddEndpointForm
-        apiId={selectedApi.id}
-        token={token}
-        onEndpointCreated={handleEndpointCreated}
-      />
-    </div>
-
-    {/* 🔥 Componente de configuração de autenticação */}
-    <AuthConfig
-      apiId={selectedApi.id}
-      token={token}
-      onConfigSaved={() => {
-        // Opcional: recarrega a API selecionada para mostrar a config
-        handleSelectApi(selectedApi.id);
-      }}
-    />
-  </>
-)}
-
         </section>
 
         <section className="bg-white p-6 rounded-xl shadow-lg">
-          <h2 className="text-2xl font-semibold text-blue-700 mb-4">
-            Testar Proxy
-          </h2>
-          {selectedApi ? (
-            <ProxyTest api={selectedApi} />
-          ) : (
-            <p className="text-gray-500">
-              Selecione uma API acima para testar o proxy
-            </p>
-          )}
-        </section>
+  <h2 className="text-2xl font-semibold text-blue-700 mb-4">
+    Testar Proxy
+  </h2>
+  {selectedApi ? (
+    <ProxyTest key={selectedApi.id} api={selectedApi} /> 
+  ) : (
+    <p className="text-gray-500">
+      Selecione uma API acima para testar o proxy
+    </p>
+  )}
+</section>
       </main>
     </div>
   );

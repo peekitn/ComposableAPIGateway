@@ -9,37 +9,60 @@ type AuthConfigProps = {
 };
 
 type AuthConfig = {
-  type: "none" | "bearer" | "apikey";
-  token?: string;
-  key?: string;
-  in?: "header" | "query";
-  name?: string;
+  type: "none" | "bearer" | "apikey" | "oauth2";
+  token?: string;                // para bearer
+  key?: string;                  // para apikey
+  in?: "header" | "query";       // para apikey
+  name?: string;                 // para apikey
+  // campos para OAuth2
+  grantType?: "client_credentials";
+  tokenUrl?: string;
+  clientId?: string;
+  clientSecret?: string;
+  audience?: string;             // <-- NOVO CAMPO
+  scopes?: string[];
 };
 
 export function AuthConfig({ apiId, token, onConfigSaved }: AuthConfigProps) {
-  const [authType, setAuthType] = useState<"none" | "bearer" | "apikey">("none");
+  const [authType, setAuthType] = useState<"none" | "bearer" | "apikey" | "oauth2">("none");
   const [bearerToken, setBearerToken] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [apiKeyName, setApiKeyName] = useState("X-API-Key");
   const [apiKeyLocation, setApiKeyLocation] = useState<"header" | "query">("header");
+  // Estados para OAuth2
+  const [tokenUrl, setTokenUrl] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [audience, setAudience] = useState(""); // <-- NOVO ESTADO
+  const [scopes, setScopes] = useState(""); // string separada por espaços
+
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
 
-  // Carregar configuração existente (opcional)
+  // Carregar configuração existente
   useEffect(() => {
     async function loadConfig() {
       try {
         const res = await axios.get(`${API_BASE_URL}/apis/${apiId}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
-        const config = res.data.authConfig;
+        const config = res.data.authConfig as AuthConfig;
         if (config) {
           setAuthType(config.type);
-          if (config.type === "bearer") setBearerToken(config.token || "");
+          if (config.type === "bearer") {
+            setBearerToken(config.token || "");
+          }
           if (config.type === "apikey") {
             setApiKey(config.key || "");
             setApiKeyName(config.name || "X-API-Key");
             setApiKeyLocation(config.in || "header");
+          }
+          if (config.type === "oauth2") {
+            setTokenUrl(config.tokenUrl || "");
+            setClientId(config.clientId || "");
+            setClientSecret(config.clientSecret || "");
+            setAudience(config.audience || ""); // <-- CARREGA AUDIENCE
+            setScopes(config.scopes?.join(" ") || "");
           }
         }
       } catch (err) {
@@ -54,13 +77,21 @@ export function AuthConfig({ apiId, token, onConfigSaved }: AuthConfigProps) {
     setLoading(true);
     setMessage("");
 
-    let authConfig: AuthConfig | null = null;
+    let authConfig: AuthConfig = { type: authType };
+
     if (authType === "bearer") {
-      authConfig = { type: "bearer", token: bearerToken };
+      authConfig.token = bearerToken;
     } else if (authType === "apikey") {
-      authConfig = { type: "apikey", key: apiKey, in: apiKeyLocation, name: apiKeyName };
-    } else {
-      authConfig = { type: "none" };
+      authConfig.key = apiKey;
+      authConfig.name = apiKeyName;
+      authConfig.in = apiKeyLocation;
+    } else if (authType === "oauth2") {
+      authConfig.grantType = "client_credentials";
+      authConfig.tokenUrl = tokenUrl;
+      authConfig.clientId = clientId;
+      authConfig.clientSecret = clientSecret;
+      authConfig.audience = audience || undefined; // <-- INCLUI AUDIENCE
+      authConfig.scopes = scopes.split(/\s+/).filter(s => s.trim() !== "");
     }
 
     try {
@@ -94,6 +125,7 @@ export function AuthConfig({ apiId, token, onConfigSaved }: AuthConfigProps) {
             <option value="none">Nenhuma</option>
             <option value="bearer">Bearer Token</option>
             <option value="apikey">API Key</option>
+            <option value="oauth2">OAuth2 (Client Credentials)</option>
           </select>
         </div>
 
@@ -144,6 +176,64 @@ export function AuthConfig({ apiId, token, onConfigSaved }: AuthConfigProps) {
                 className="border rounded px-3 py-2 w-full"
                 placeholder="sua-api-key"
                 required
+              />
+            </div>
+          </>
+        )}
+
+        {authType === "oauth2" && (
+          <>
+            <div>
+              <label className="block font-medium mb-1">Token URL</label>
+              <input
+                type="url"
+                value={tokenUrl}
+                onChange={(e) => setTokenUrl(e.target.value)}
+                className="border rounded px-3 py-2 w-full"
+                placeholder="https://exemplo.com/oauth/token"
+                required
+              />
+            </div>
+            <div>
+              <label className="block font-medium mb-1">Client ID</label>
+              <input
+                type="text"
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                className="border rounded px-3 py-2 w-full"
+                placeholder="seu-client-id"
+                required
+              />
+            </div>
+            <div>
+              <label className="block font-medium mb-1">Client Secret</label>
+              <input
+                type="password"
+                value={clientSecret}
+                onChange={(e) => setClientSecret(e.target.value)}
+                className="border rounded px-3 py-2 w-full"
+                placeholder="seu-client-secret"
+                required
+              />
+            </div>
+            <div>
+              <label className="block font-medium mb-1">Audience (opcional para alguns provedores)</label>
+              <input
+                type="text"
+                value={audience}
+                onChange={(e) => setAudience(e.target.value)}
+                className="border rounded px-3 py-2 w-full"
+                placeholder="https://api.exemplo.com"
+              />
+            </div>
+            <div>
+              <label className="block font-medium mb-1">Scopes (opcional, separados por espaço)</label>
+              <input
+                type="text"
+                value={scopes}
+                onChange={(e) => setScopes(e.target.value)}
+                className="border rounded px-3 py-2 w-full"
+                placeholder="read write"
               />
             </div>
           </>

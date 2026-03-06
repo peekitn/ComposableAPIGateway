@@ -20,7 +20,6 @@ type Props = {
   api: Api;
 };
 
-// Métodos HTTP válidos
 const HTTP_METHODS = ["get", "post", "put", "delete", "patch", "options", "head"];
 
 export function ProxyTest({ api }: Props) {
@@ -45,10 +44,8 @@ export function ProxyTest({ api }: Props) {
       setLoadingEndpoints(true);
       console.log("🔵 Carregando endpoints...");
 
-      // Verifica se há OpenAPI com paths não vazios e com métodos
       let hasValidOpenAPI = false;
       if (api.openapiSpec?.paths) {
-        // Verifica se pelo menos um path tem métodos
         const paths = api.openapiSpec.paths;
         for (const path in paths) {
           const methods = paths[path];
@@ -90,7 +87,6 @@ export function ProxyTest({ api }: Props) {
         return;
       }
 
-      // Se não há OpenAPI válido, busca endpoints manuais
       console.log("🔵 Nenhum OpenAPI válido, buscando endpoints manuais...");
       if (!token) {
         console.log("🔵 Sem token, não pode buscar endpoints manuais");
@@ -158,7 +154,10 @@ export function ProxyTest({ api }: Props) {
 
       const res = await fetch(url, {
         method: selectedEndpoint.method,
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`, // 🔥 TOKEN DO USUÁRIO
+        },
         body: selectedEndpoint.method !== "GET" ? requestBody : undefined,
       });
 

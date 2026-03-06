@@ -5,13 +5,112 @@ import https from "https";
 import axios from "axios";
 import jwt from "jsonwebtoken";
 import SwaggerParser from "@apidevtools/swagger-parser";
-import rateLimit from '@fastify/rate-limit';
+import Redis from 'ioredis';
+import { RateLimiterRedis, RateLimiterMemory } from 'rate-limiter-flexible';
 
 const JWT_SECRET = process.env.JWT_SECRET || "supersecret";
 const validator = new OpenAPISchemaValidator({ version: 3 });
 
 // Cache simples para tokens OAuth2 (em memória)
 const oauthTokenCache: Record<string, { token: string; expiresAt: number }> = {};
+
+// Cliente Redis com tratamento de erro
+let redisClient: Redis | null = null;
+console.log("🔌 Inicializando cliente Redis...");
+try {
+  redisClient = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
+    lazyConnect: true,
+    retryStrategy: (times) => {
+      if (times > 5) {
+        console.error('❌ Redis connection failed after 5 retries. Using memory fallback.');
+        return null;
+      }
+      console.log(`🔄 Redis retry attempt ${times}`);
+      return Math.min(times * 100, 3000);
+    }
+  });
+
+  redisClient.on('error', (err) => {
+    console.error('⚠️ Redis client error:', err.message);
+    console.log('⚠️ Desabilitando Redis, usando fallback de memória');
+    redisClient = null;
+  });
+
+  redisClient.on('connect', () => {
+    console.log('✅ Redis connected successfully');
+  });
+
+  // Tenta conectar
+  redisClient.connect().catch((err) => {
+    console.error('❌ Could not connect to Redis:', err.message);
+    console.log('❌ Usando fallback de memória');
+    redisClient = null;
+  });
+} catch (err) {
+  console.error('❌ Redis initialization failed:', err);
+  redisClient = null;
+}
+
+// Mapa para armazenar os rate limiters por API
+const memoryRateLimiters = new Map<string, RateLimiterMemory>();
+const redisRateLimiters = new Map<string, RateLimiterRedis>();
+
+function getRateLimiter(apiId: string, config: any): RateLimiterRedis | RateLimiterMemory {
+  console.log(`🔍 getRateLimiter para API ${apiId}, redisClient disponível:`, !!redisClient);
+  
+  if (redisClient) {
+    if (!redisRateLimiters.has(apiId)) {
+      try {
+        console.log(`🆕 Criando novo RateLimiterRedis para API ${apiId}`);
+        const limiter = new RateLimiterRedis({
+          storeClient: redisClient,
+          keyPrefix: `rl:${apiId}:`,
+          points: config.max,
+          duration: parseTimeWindowToSeconds(config.timeWindow),
+        });
+        redisRateLimiters.set(apiId, limiter);
+        console.log(`✅ Rate limiter Redis criado para API ${apiId}`);
+      } catch (err) {
+        console.error(`❌ Erro ao criar rate limiter Redis para API ${apiId}:`, err);
+        return getMemoryRateLimiter(apiId, config);
+      }
+    } else {
+      console.log(`♻️ Reutilizando RateLimiterRedis existente para API ${apiId}`);
+    }
+    return redisRateLimiters.get(apiId)!;
+  } else {
+    console.log(`💾 Redis indisponível, usando memória para API ${apiId}`);
+    return getMemoryRateLimiter(apiId, config);
+  }
+}
+
+function getMemoryRateLimiter(apiId: string, config: any): RateLimiterMemory {
+  if (!memoryRateLimiters.has(apiId)) {
+    console.log(`🆕 Criando novo RateLimiterMemory para API ${apiId}`);
+    const limiter = new RateLimiterMemory({
+      keyPrefix: `rl:${apiId}:`,
+      points: config.max,
+      duration: parseTimeWindowToSeconds(config.timeWindow),
+    });
+    memoryRateLimiters.set(apiId, limiter);
+    console.log(`✅ Rate limiter Memory criado para API ${apiId}`);
+  } else {
+    console.log(`♻️ Reutilizando RateLimiterMemory existente para API ${apiId}`);
+  }
+  return memoryRateLimiters.get(apiId)!;
+}
+
+function parseTimeWindowToSeconds(timeWindow: string): number {
+  const [value, unit] = timeWindow.split(' ');
+  const num = parseInt(value, 10);
+  switch (unit) {
+    case 'seconds': return num;
+    case 'minutes': return num * 60;
+    case 'hours': return num * 60 * 60;
+    case 'days': return num * 24 * 60 * 60;
+    default: return 60;
+  }
+}
 
 async function getOAuthToken(config: any): Promise<string> {
   const cacheKey = `${config.clientId}:${config.tokenUrl}`;
@@ -26,7 +125,6 @@ async function getOAuthToken(config: any): Promise<string> {
   console.log("📤 Config completa:", JSON.stringify(config, null, 2));
   console.log("📤 Audience recebida:", config.audience);
 
-  // Monta payload em JSON
   const payload: any = {
     grant_type: 'client_credentials',
     client_id: config.clientId,
@@ -169,155 +267,161 @@ export async function apiRoutes(app: FastifyInstance) {
     }
   });
 
-  // PROXY COM RATE LIMIT CONFIGURÁVEL
+  // PROXY COM RATE LIMIT
   app.register(async function (proxyRoutes) {
-  // Hook para buscar a API e anexar ao request
-  proxyRoutes.addHook('preHandler', async (request: any, reply) => {
-    const auth = request.headers.authorization;
-    if (!auth) return reply.status(401).send({ error: "Token ausente" });
+    // Hook para buscar a API
+    proxyRoutes.addHook('preHandler', async (request: any, reply) => {
+      const auth = request.headers.authorization;
+      if (!auth) return reply.status(401).send({ error: "Token ausente" });
 
-    const token = auth.replace("Bearer ", "");
-    const decoded = jwt.verify(token, JWT_SECRET) as any;
-    const userId = decoded.id;
+      const token = auth.replace("Bearer ", "");
+      const decoded = jwt.verify(token, JWT_SECRET) as any;
+      const userId = decoded.id;
 
-    // Extrai o slug do path (primeiro segmento)
-    const fullPath = request.params["*"] || "";
-    const parts = fullPath.split('/');
-    const slug = parts[0];
-    const remainingPath = parts.slice(1).join('/');
+      const fullPath = request.params["*"] || "";
+      const parts = fullPath.split('/');
+      const slug = parts[0];
+      const remainingPath = parts.slice(1).join('/');
 
-    if (!slug) return reply.status(404).send({ error: "Slug não fornecido" });
+      if (!slug) return reply.status(404).send({ error: "Slug não fornecido" });
 
-    const api = await prisma.api.findFirst({ where: { slug, userId } });
-    if (!api) return reply.status(404).send({ error: "API não encontrada" });
+      console.log(`🔍 Buscando API com slug: ${slug} para usuário ${userId}`);
+      const api = await prisma.api.findFirst({ where: { slug, userId } });
+      if (!api) return reply.status(404).send({ error: "API não encontrada" });
 
-    request.api = api;
-    request.remainingPath = remainingPath; // armazena o path restante
-  });
+      console.log(`✅ API encontrada: ${api.name} (${api.id})`);
+      request.api = api;
+      request.remainingPath = remainingPath;
+    });
 
-  // Aplica rate limit dinâmico baseado na configuração da API
-  proxyRoutes.register(rateLimit, {
-    keyGenerator: (request: any) => {
-      return `api_${request.api?.id || 'unknown'}_${request.ip}`;
-    },
-    max: (request: any) => {
-      if (request.api?.rateLimitConfig?.enabled) {
-        return request.api.rateLimitConfig.max;
+    // Middleware de rate limit
+    proxyRoutes.addHook('preHandler', async (request: any, reply) => {
+      const api = request.api;
+      if (!api) return;
+
+      console.log(`🔍 Verificando rate limit para API ${api.id}, enabled:`, api.rateLimitConfig?.enabled);
+
+      if (!api.rateLimitConfig?.enabled) {
+        console.log("⏭️ Rate limit desabilitado, prosseguindo");
+        return;
       }
-      return Number.MAX_SAFE_INTEGER;
-    },
-    timeWindow: (request: any) => {
-      return request.api?.rateLimitConfig?.enabled
-        ? request.api.rateLimitConfig.timeWindow
-        : '1 minute';
-    },
-    errorResponseBuilder: (request: any, context) => {
-      return {
-        error: 'Rate limit exceeded',
-        message: `Máximo de ${context.max} requisições por ${context.timeWindow}`,
-        statusCode: 429
-      };
-    }
-  });
 
-  // Define a rota proxy
-  proxyRoutes.all("/*", async (request: any, reply) => {
-    const api = request.api;
-    const path = request.remainingPath || ""; // usa o path sem o slug
-    const query = request.query;
+      console.log(`📊 Configuração: max=${api.rateLimitConfig.max}, timeWindow=${api.rateLimitConfig.timeWindow}`);
 
-    try {
-      let finalHeaders: Record<string, string> = {};
-      let finalQuery = new URLSearchParams(query);
+      const limiter = getRateLimiter(api.id, api.rateLimitConfig);
+      const key = request.ip;
 
-      // Aplica autenticação customizada
-      if (api.authConfig) {
-        const config = api.authConfig as any;
-        if (config.type === 'bearer' && config.token) {
-          finalHeaders['Authorization'] = `Bearer ${config.token}`;
-        } else if (config.type === 'apikey' && config.key && config.name) {
-          if (config.in === 'header') {
-            finalHeaders[config.name] = config.key;
-          } else if (config.in === 'query') {
-            finalQuery.append(config.name, config.key);
-          }
-        } else if (config.type === 'oauth2') {
-          try {
-            const oauthToken = await getOAuthToken(config);
-            finalHeaders['Authorization'] = `Bearer ${oauthToken}`;
-          } catch (err) {
-            console.error('Erro OAuth2:', err);
-            return reply.status(502).send({ error: 'Falha na autenticação OAuth2' });
+      try {
+        await limiter.consume(key);
+        console.log(`✅ Requisição permitida para IP ${key}.`);
+      } catch (rateLimiterRes) {
+        console.log(`❌ Rate limit EXCEDIDO para IP ${key}`);
+        const secs = Math.round(rateLimiterRes.msBeforeNext / 1000) || 1;
+        reply.header('Retry-After', String(secs));
+        return reply.status(429).send({
+          error: 'Rate limit exceeded',
+          message: `Máximo de ${api.rateLimitConfig.max} requisições por ${api.rateLimitConfig.timeWindow}`,
+          statusCode: 429
+        });
+      }
+    });
+
+    // Rota proxy principal
+    proxyRoutes.all("/*", async (request: any, reply) => {
+      const api = request.api;
+      const path = request.remainingPath || "";
+      const query = request.query;
+
+      try {
+        let finalHeaders: Record<string, string> = {};
+        let finalQuery = new URLSearchParams(query);
+
+        if (api.authConfig) {
+          const config = api.authConfig as any;
+          if (config.type === 'bearer' && config.token) {
+            finalHeaders['Authorization'] = `Bearer ${config.token}`;
+          } else if (config.type === 'apikey' && config.key && config.name) {
+            if (config.in === 'header') {
+              finalHeaders[config.name] = config.key;
+            } else if (config.in === 'query') {
+              finalQuery.append(config.name, config.key);
+            }
+          } else if (config.type === 'oauth2') {
+            try {
+              const oauthToken = await getOAuthToken(config);
+              finalHeaders['Authorization'] = `Bearer ${oauthToken}`;
+            } catch (err) {
+              console.error('Erro OAuth2:', err);
+              return reply.status(502).send({ error: 'Falha na autenticação OAuth2' });
+            }
           }
         }
-      }
 
-      // Repassa headers permitidos da requisição original
-      const allowedHeaders = ["content-type", "accept", "user-agent"];
-      for (const [key, value] of Object.entries(request.headers)) {
-        if (allowedHeaders.includes(key.toLowerCase()) && typeof value === "string") {
-          finalHeaders[key] = value;
+        const allowedHeaders = ["content-type", "accept", "user-agent"];
+        for (const [key, value] of Object.entries(request.headers)) {
+          if (allowedHeaders.includes(key.toLowerCase()) && typeof value === "string") {
+            finalHeaders[key] = value;
+          }
         }
-      }
 
-      const queryString = finalQuery.toString();
-      const finalUrl = `${api.baseUrl}/${path}${queryString ? '?' + queryString : ''}`;
+        const queryString = finalQuery.toString();
+        const finalUrl = `${api.baseUrl}/${path}${queryString ? '?' + queryString : ''}`;
 
-      console.log("🔗 Proxy chamando:", finalUrl, "com headers:", finalHeaders);
+        console.log("🔗 Proxy chamando:", finalUrl);
 
-      const response = await axios({
-        method: request.method,
-        url: finalUrl,
-        headers: finalHeaders,
-        data: request.body,
-        httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-      });
-
-      const responseData = JSON.stringify(response.data);
-      const truncatedResponse = responseData.length > 10000
-        ? { truncated: true, data: responseData.slice(0, 10000) + "..." }
-        : response.data;
-
-      await prisma.requestLog.create({
-        data: {
-          apiId: api.id,
+        const response = await axios({
           method: request.method,
-          path: path + (queryString ? '?' + queryString : ''),
-          body: request.body || null,
+          url: finalUrl,
           headers: finalHeaders,
-          status: response.status,
-          response: truncatedResponse,
-        },
-      });
+          data: request.body,
+          httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+        });
 
-      reply.status(response.status).send(response.data);
-    } catch (err: any) {
-      console.error("❌ Erro no proxy:", err);
-      const errorResponse = err.response?.data || { error: err.message };
-      const errorStatus = err.response?.status || 500;
+        const responseData = JSON.stringify(response.data);
+        const truncatedResponse = responseData.length > 10000
+          ? { truncated: true, data: responseData.slice(0, 10000) + "..." }
+          : response.data;
 
-      if (api?.id) {
-        try {
-          await prisma.requestLog.create({
-            data: {
-              apiId: api.id,
-              method: request.method,
-              path: path,
-              body: request.body || null,
-              headers: request.headers,
-              status: errorStatus,
-              response: errorResponse,
-            },
-          });
-        } catch (logErr) {
-          console.error("Erro ao salvar log de erro:", logErr);
+        await prisma.requestLog.create({
+          data: {
+            apiId: api.id,
+            method: request.method,
+            path: path + (queryString ? '?' + queryString : ''),
+            body: request.body || null,
+            headers: finalHeaders,
+            status: response.status,
+            response: truncatedResponse,
+          },
+        });
+
+        reply.status(response.status).send(response.data);
+      } catch (err: any) {
+        console.error("❌ Erro no proxy:", err.message);
+        const errorResponse = err.response?.data || { error: err.message };
+        const errorStatus = err.response?.status || 500;
+
+        if (api?.id) {
+          try {
+            await prisma.requestLog.create({
+              data: {
+                apiId: api.id,
+                method: request.method,
+                path: path,
+                body: request.body || null,
+                headers: request.headers,
+                status: errorStatus,
+                response: errorResponse,
+              },
+            });
+          } catch (logErr) {
+            console.error("Erro ao salvar log de erro:", logErr);
+          }
         }
-      }
 
-      reply.status(errorStatus).send(errorResponse);
-    }
-  });
-}, { prefix: "/proxy" });
+        reply.status(errorStatus).send(errorResponse);
+      }
+    });
+  }, { prefix: "/proxy" });
 
   // ADICIONAR ENDPOINT MANUAL
   app.post("/apis/:apiId/endpoints", async (request: any, reply) => {
@@ -452,7 +556,7 @@ export async function apiRoutes(app: FastifyInstance) {
       const userId = decoded.id;
 
       const { id } = request.params;
-      const { rateLimitConfig } = request.body; // { enabled: true, max: 100, timeWindow: "1 minute" }
+      const { rateLimitConfig } = request.body;
 
       const api = await prisma.api.findFirst({
         where: { id, userId },
@@ -464,6 +568,9 @@ export async function apiRoutes(app: FastifyInstance) {
         where: { id },
         data: { rateLimitConfig },
       });
+
+      redisRateLimiters.delete(id);
+      memoryRateLimiters.delete(id);
 
       return reply.send(updatedApi);
     } catch (err) {
